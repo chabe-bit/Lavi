@@ -173,8 +173,8 @@ typedef struct {
         struct  {
             u16  usButtonFlags;
             u16  usButtonData;
-        } DUMMYSTRUCTNAME;
-    } DUMMYUNIONNAME;
+        } s_param;
+    } u_param;
     u32 ulRawButtons;
     s32 lLastX;
     s32 lLastY;
@@ -438,8 +438,9 @@ typedef struct {
     LAVI_WINFUNC(user32,   GetKeyboardState,            int,                        (u8 *lpKeyState)) \
     LAVI_WINFUNC(user32,   GetLastError,                s32 ,                       (void)) \
     LAVI_WINFUNC(user32,   GetWindowLongPtrA,           s64,                        (void *hwnd, int nIndex)) \
+    LAVI_WINFUNC(kernel32, GetProcessHeap,              void *,                     (void)) \
     LAVI_WINFUNC(user32,   GetRawInputData,             u32,                        (void *hRawInput, u32 uiCmd, void *pData, u32 *pcbSize, u32 cbSizeHeader)) \
-    LAVI_WINFUNC(kernel32, HeapAlloc,                   void *,                     (void *hwnd, u64 idEvent)) \
+    LAVI_WINFUNC(kernel32, HeapAlloc,                   void *,                     (void *hwnd, u64 idEvent, size_t dwBytes)) \
     LAVI_WINFUNC(kernel32, HeapFree,                    int,                        (void *hHeap, s32 dwFlags, void *lpMem)) \
     LAVI_WINFUNC(user32,   KillTimer,                   int,                        (void *hwnd, u64 idEvent)) \
     LAVI_WINFUNC(kernel32, OutputDebugStringA,          void,                       (const char *str)) \
@@ -507,8 +508,19 @@ typedef struct {
 } lavi_gamepad;
 
 enum {
-    LAVI_MAX_KEYS = 256,  
+    LAVI_MAX_KEYS = 256, 
 };
+
+typedef struct {
+    // Properties of a mouse is that it has two buttons, left and right, and a wheel in which 
+    // has a spin feature to it. Capture the wheel's pos and movement.  
+    lavi_digitalbutton lbutton,
+                       rbutton;
+    int wheel;
+    int dt_wheel;
+    point pos;
+    point dt_pos;
+} lavi_mouse;
 
 
 typedef struct lavi_api lavi_api;
@@ -551,6 +563,7 @@ struct lavi_api {
 
     lavi_digitalbutton keys[LAVI_MAX_KEYS];
     lavi_gamepad gamepad;
+    lavi_mouse   mouse; 
 
     struct {
         boolean attached;
@@ -823,6 +836,19 @@ lavi_message_fiber_proc(void)
     }
 }
 
+#define RID_INPUT 0x10000003
+#define RIM_TYPEMOUSE 0 
+#define MOUSE_MOVE_RELATIVE 0
+#define WHEEL_DELTA 120
+#define RI_MOUSE_LEFT_BUTTON_DOWN   0x0001  // Left Button changed to down.
+#define RI_MOUSE_LEFT_BUTTON_UP     0x0002  // Left Button changed to up.
+#define RI_MOUSE_RIGHT_BUTTON_DOWN  0x0004  // Right Button changed to down.
+#define RI_MOUSE_RIGHT_BUTTON_UP    0x0008  // Right Button changed to up.
+#define RI_MOUSE_MIDDLE_BUTTON_DOWN 0x0010  // Middle Button changed to down.
+#define RI_MOUSE_MIDDLE_BUTTON_UP   0x0020  // Middle Button changed to up.
+#define RI_MOUSE_WHEEL              0x0400
+#define HEAP_MEMORY_ZERO            0x00000008 
+
 static size_t __stdcall 
 lavi_main_proc(void * hwnd,
                u32 message,
@@ -833,8 +859,56 @@ lavi_main_proc(void * hwnd,
     size_t result = 0;
     
     switch (message) {
-    case WM_INPUT:
+    case WM_INPUT: {
+        RAWINPUT *ri = NULL;
+        u32 ri_size = 0;
+        void *hheap = lavi_GetProcessHeap();
+            
+        if (lavi_GetRawInputData((void *)lparam, RID_INPUT, NULL, &ri_size, sizeof(RAWINPUTHEADER)) == (u32)-1) {
+            goto cleanup;
+        }
+
+        ri = (RAWINPUT *)lavi_HeapAlloc(hheap, HEAP_MEMORY_ZERO, ri_size);
+        if (!ri)
+            goto cleanup;
+        
+        if (lavi_GetRawInputData((void *)lparam, RID_INPUT, ri, &ri_size, sizeof(RAWINPUTHEADER)) == 0) {
+            goto cleanup;
+        }
+
+        if (ri->header.dwType == RIM_TYPEMOUSE && ri->data.mouse.usFlags == MOUSE_MOVE_RELATIVE) {
+            u16 button_flags;
+            boolean lbutton_down;
+            boolean rbutton_down;
+
+            api->mouse.dt_pos.x += ri->data.mouse.lLastX;
+            api->mouse.dt_pos.y += ri->data.mouse.lLastY;
+            button_flags = ri->data.mouse.u_param.s_param.usButtonFlags;
+            
+            lbutton_down = api->mouse.lbutton.is_down;
+            if (button_flags & RI_MOUSE_LEFT_BUTTON_DOWN)
+                lbutton_down = LAVI_TRUE;
+            if (button_flags & RI_MOUSE_LEFT_BUTTON_UP)
+                lbutton_down = LAVI_FALSE;
+            lavi_update_digitalbutton(&api->mouse.lbutton, lbutton_down);
+
+            rbutton_down = api->mouse.rbutton.is_down;
+            if (button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN)
+                rbutton_down = LAVI_TRUE;
+            if (button_flags & RI_MOUSE_RIGHT_BUTTON_UP)
+                rbutton_down = LAVI_FALSE;
+            lavi_update_digitalbutton(&api->mouse.rbutton, rbutton_down);
+
+            if (button_flags & RI_MOUSE_WHEEL) 
+                api->mouse.dt_wheel += ((s16)ri->data.mouse.u_param.s_param.usButtonData) / WHEEL_DELTA;
+        }
+
+cleanup:
+        if (ri) 
+            lavi_HeapFree(hheap, 0, ri);
+
         break;
+    }
     case WM_TIMER:
         lavi_SwitchToFiber(api->win32.main_fiber);
         break;

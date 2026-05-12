@@ -16,6 +16,7 @@ void lavi_main(int argc, char **argv)
         if (api.keys[LAVI_VK_ALT].is_released) {
             printf("RELEASED\n");
         }
-    }
+
+     }
 
 }
